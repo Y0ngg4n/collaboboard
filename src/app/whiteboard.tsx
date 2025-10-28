@@ -1,21 +1,56 @@
+// Whiteboard.tsx
 "use client";
-import React, { useEffect, useRef, useState, useCallback } from "react";
-import { Canvas, Circle, FabricObject, Point, PencilBrush } from "fabric";
-import Toolbar from "./Toolbar";
 
-interface MouseEvent {
-  e: any;
-}
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import {
+  Canvas,
+  PencilBrush,
+  TPointerEventInfo,
+  Point,
+  Circle,
+  Rect,
+  FabricObject,
+  util,
+} from "fabric";
+
+import Toolbar, { ToolType } from "./Toolbar";
 
 const Whiteboard: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [canvas, setCanvas] = useState<Canvas | null>(null);
-  const [tool, setTool] = useState<string>("draw");
+  const [tool, setTool] = useState<ToolType>("draw");
   const [zoomPercentage, setZoomPercentage] = useState<number>(100);
-  const isDragging = useRef<boolean>(false);
-  const lastPosX = useRef<number>(0);
-  const lastPosY = useRef<number>(0);
-  const [brushColor, setBrushColor] = useState<string>("#000000"); // Default to black
+  const [brushColor, setBrushColor] = useState<string>("#000000FF");
+
+  const isDragging = useRef(false);
+  const lastPos = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const handlers = useRef<{ [key: string]: any }>({});
+
+  const isDrawingShape = useRef(false);
+  const shapeStartPoint = useRef<{ x: number; y: number } | null>(null);
+  const currentShape = useRef<FabricObject | null>(null);
+
+  const getFabricColorProps = useCallback((hexA: string) => {
+    if (hexA.length === 9) {
+      const hex = hexA.substring(0, 7);
+      const alphaHex = hexA.substring(7, 9);
+      const alpha = parseInt(alphaHex, 16) / 255;
+      return {
+        fill: hex,
+        opacity: alpha,
+        stroke: hex,
+        strokeOpacity: alpha,
+        strokeWidth: 5,
+      };
+    }
+    return {
+      fill: hexA,
+      opacity: 1,
+      stroke: hexA,
+      strokeOpacity: 1,
+      strokeWidth: 5,
+    };
+  }, []);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -24,26 +59,22 @@ const Whiteboard: React.FC = () => {
       isDrawingMode: false,
     });
     setCanvas(fabricCanvas);
-    if (!fabricCanvas.freeDrawingBrush) {
-      // You might need to cast `fabricCanvas` to `any` or extend the Fabric types
-      // if Typescript complains that PencilBrush isn't compatible with freeDrawingBrush.
-      fabricCanvas.freeDrawingBrush = new PencilBrush(fabricCanvas);
-    }
-    fabricCanvas.freeDrawingBrush!.color = brushColor; // Black color
 
-    fabricCanvas.freeDrawingBrush!.width = 5; // 5px wide line
+    const brush = new PencilBrush(fabricCanvas);
+    brush.color = brushColor;
+    brush.width = 5;
+    fabricCanvas.freeDrawingBrush = brush;
+
     const resizeCanvas = () => {
       fabricCanvas.setDimensions({
         width: window.innerWidth - 20,
         height: window.innerHeight - 70,
       });
-      fabricCanvas.renderAll();
+      fabricCanvas.requestRenderAll();
     };
-
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
 
-    // Add a dot in the center of the canvas
     const dot = new Circle({
       radius: 5,
       fill: "red",
@@ -53,186 +84,304 @@ const Whiteboard: React.FC = () => {
     });
     fabricCanvas.add(dot);
 
-    // Load canvas data from local storage
-    const savedCanvasData = localStorage.getItem("canvasData");
-    if (savedCanvasData) {
+    const saved = localStorage.getItem("canvasData");
+    if (saved) {
       try {
-        fabricCanvas.loadFromJSON(savedCanvasData, () => {
-          fabricCanvas.renderAll();
-        });
-      } catch (error) {
-        console.error("Failed to load canvas data:", error);
+        fabricCanvas.loadFromJSON(JSON.parse(saved));
+      } catch (err) {
+        console.error("Failed to load canvas:", err);
       }
     }
 
-    // Save canvas data to local storage before unload
-    const saveCanvasData = () => {
-      try {
-        const jsonData = fabricCanvas.toJSON();
-        localStorage.setItem("canvasData", JSON.stringify(jsonData));
-      } catch (error) {
-        console.error("Failed to save canvas data:", error);
-      }
+    const saveCanvas = () => {
+      localStorage.setItem("canvasData", JSON.stringify(fabricCanvas.toJSON()));
     };
-    window.addEventListener("beforeunload", saveCanvasData);
+    window.addEventListener("beforeunload", saveCanvas);
 
     return () => {
-      saveCanvasData();
+      saveCanvas();
       fabricCanvas.dispose();
       window.removeEventListener("resize", resizeCanvas);
-      window.removeEventListener("beforeunload", saveCanvasData);
+      window.removeEventListener("beforeunload", saveCanvas);
     };
   }, []);
 
-  const checkCanvasBounds = useCallback(
-    (e: MouseEvent) => {
-      if (!canvas) return;
+  useEffect(() => {
+    if (canvas && canvas.freeDrawingBrush) {
+      canvas.freeDrawingBrush.color = brushColor;
+    }
+  }, [canvas, brushColor]);
 
-      const pointer = canvas.getPointer(e.e);
-      const buffer = 50;
-      let needsUpdate = false;
-
-      const currentWidth = canvas.getWidth();
-      const currentHeight = canvas.getHeight();
-
-      if (pointer.x > currentWidth - buffer) {
-        canvas.setWidth(currentWidth + 200);
-        needsUpdate = true;
-      }
-      if (pointer.y > currentHeight - buffer) {
-        canvas.setHeight(currentHeight + 200);
-        needsUpdate = true;
-      }
-
-      if (needsUpdate) {
-        canvas.renderAll();
-      }
+  const getPointer = useCallback(
+    (event: TPointerEventInfo<PointerEvent>): { x: number; y: number } => {
+      if (!canvas) return { x: 0, y: 0 };
+      const pointer = util.getPointer(event.e, canvas.getElement());
+      return { x: pointer.x, y: pointer.y };
     },
     [canvas],
+  );
+
+  const getScreenPointer = useCallback(
+    (
+      event: TPointerEventInfo<PointerEvent | WheelEvent>,
+    ): { x: number; y: number } => {
+      if (!canvas) return { x: 0, y: 0 };
+      return { x: event.e.offsetX, y: event.e.offsetY };
+    },
+    [canvas],
+  );
+
+  const checkBounds = useCallback(
+    (event: TPointerEventInfo<PointerEvent>) => {
+      if (!canvas || isDrawingShape.current || isDragging.current) return;
+      const pointer = getScreenPointer(event);
+      let changed = false;
+      if (pointer.x > canvas.getWidth() - 50) {
+        canvas.set({ width: canvas.getWidth() + 200 });
+        changed = true;
+      }
+      if (pointer.y > canvas.getHeight() - 50) {
+        canvas.set({ height: canvas.getHeight() + 200 });
+        changed = true;
+      }
+      if (changed) canvas.requestRenderAll();
+    },
+    [canvas, getScreenPointer],
   );
 
   const startPanning = useCallback(
-    (opt: MouseEvent) => {
-      if (tool === "grab") {
-        const evt = opt.e;
-        isDragging.current = true;
-        lastPosX.current = evt.clientX;
-        lastPosY.current = evt.clientY;
-      }
+    (event: TPointerEventInfo<PointerEvent>) => {
+      if (tool !== "grab" || !canvas) return;
+      event.e.preventDefault();
+
+      isDragging.current = true;
+      const p = getScreenPointer(event);
+      lastPos.current = p;
+      canvas.selection = false;
     },
-    [tool],
+    [tool, canvas, getScreenPointer],
   );
 
   const panCanvas = useCallback(
-    (opt: MouseEvent) => {
-      if (isDragging.current && canvas) {
-        const e = opt.e;
-        const vpt = canvas.viewportTransform;
-        if (vpt) {
-          vpt[4] += e.clientX - lastPosX.current;
-          vpt[5] += e.clientY - lastPosY.current;
-          canvas.requestRenderAll();
-          lastPosX.current = e.clientX;
-          lastPosY.current = e.clientY;
-        }
-      }
+    (event: TPointerEventInfo<PointerEvent>) => {
+      if (!isDragging.current || !canvas) return;
+
+      const p = getScreenPointer(event);
+      const deltaX = p.x - lastPos.current.x;
+      const deltaY = p.y - lastPos.current.y;
+
+      const vpt = canvas.viewportTransform;
+      if (!vpt) return;
+
+      vpt[4] += deltaX;
+      vpt[5] += deltaY;
+
+      canvas.setViewportTransform(vpt);
+      canvas.requestRenderAll();
+      lastPos.current = p;
     },
-    [canvas],
+    [canvas, getScreenPointer],
   );
 
   const stopPanning = useCallback(() => {
     isDragging.current = false;
-  }, []);
+    if (canvas) canvas.selection = true;
+  }, [canvas]);
 
   const handleZoom = useCallback(
-    (opt: MouseEvent) => {
+    (event: TPointerEventInfo<WheelEvent>) => {
       if (!canvas) return;
+      event.e.preventDefault();
 
-      const delta = opt.e.deltaY;
+      const delta = event.e.deltaY;
       let zoom = canvas.getZoom();
-      zoom = zoom + delta / 200;
-      zoom = Math.max(0.05, zoom);
-      zoom = Math.min(5, zoom);
 
-      const point = new Point(opt.e.offsetX, opt.e.offsetY);
-      canvas.zoomToPoint(point, zoom);
+      zoom *= 0.999 ** delta;
+      zoom = Math.min(5, Math.max(0.05, zoom));
+
+      canvas.zoomToPoint(new Point(event.e.offsetX, event.e.offsetY), zoom);
+
       setZoomPercentage(Math.round(zoom * 100));
-      opt.e.preventDefault();
-      opt.e.stopPropagation();
     },
     [canvas],
   );
 
+  const startShapeDraw = useCallback(
+    (event: TPointerEventInfo<PointerEvent>) => {
+      if ((tool !== "rect" && tool !== "circle") || !canvas) return;
+
+      const pointer = getPointer(event);
+      isDrawingShape.current = true;
+      shapeStartPoint.current = pointer;
+
+      const { fill, opacity, strokeWidth } = getFabricColorProps(brushColor);
+
+      let shape: FabricObject;
+
+      if (tool === "rect") {
+        shape = new Rect({
+          left: pointer.x,
+          top: pointer.y,
+          width: 0,
+          height: 0,
+          fill: fill,
+          opacity: opacity,
+          strokeWidth: strokeWidth,
+          stroke: fill,
+          selectable: true,
+        });
+      } else {
+        shape = new Circle({
+          left: pointer.x,
+          top: pointer.y,
+          radius: 0,
+          fill: fill,
+          opacity: opacity,
+          strokeWidth: strokeWidth,
+          stroke: fill,
+          selectable: true,
+        });
+      }
+
+      canvas.add(shape);
+      currentShape.current = shape;
+    },
+    [tool, canvas, brushColor, getPointer, getFabricColorProps],
+  );
+
+  const drawShape = useCallback(
+    (event: TPointerEventInfo<PointerEvent>) => {
+      if (
+        !isDrawingShape.current ||
+        !canvas ||
+        !currentShape.current ||
+        !shapeStartPoint.current
+      )
+        return;
+
+      const pointer = getPointer(event);
+      const start = shapeStartPoint.current;
+      const current = currentShape.current;
+
+      if (tool === "rect") {
+        const rect = current as Rect;
+        const left = Math.min(pointer.x, start.x);
+        const top = Math.min(pointer.y, start.y);
+        const width = Math.abs(pointer.x - start.x);
+        const height = Math.abs(pointer.y - start.y);
+
+        rect.set({ left, top, width, height });
+      } else if (tool === "circle") {
+        const circle = current as Circle;
+        const radius =
+          Math.sqrt(
+            Math.pow(pointer.x - start.x, 2) + Math.pow(pointer.y - start.y, 2),
+          ) / 2;
+        const center = {
+          x: (start.x + pointer.x) / 2,
+          y: (start.y + pointer.y) / 2,
+        };
+
+        circle.set({ left: center.x - radius, top: center.y - radius, radius });
+      }
+
+      canvas.requestRenderAll();
+    },
+    [tool, canvas, getPointer],
+  );
+
+  const stopShapeDraw = useCallback(() => {
+    if (!isDrawingShape.current || !currentShape.current || !canvas) return;
+
+    if (currentShape.current.width! < 2 || currentShape.current.height! < 2) {
+      canvas.remove(currentShape.current);
+    } else {
+      currentShape.current.setCoords();
+    }
+
+    isDrawingShape.current = false;
+    currentShape.current = null;
+    canvas.selection = true;
+  }, [canvas]);
+
   useEffect(() => {
     if (!canvas) return;
 
+    // Remove all existing handlers
+    Object.entries(handlers.current).forEach(([name, fn]) =>
+      canvas.off(name as any, fn),
+    );
+    handlers.current = {};
+
     canvas.isDrawingMode = tool === "draw";
+    canvas.defaultCursor = tool === "grab" ? "grab" : "default";
 
-    // Remove all event listeners first (using the non-deprecated method)
-    canvas.__eventListeners = canvas.__eventListeners || {};
-    canvas.__eventListeners["mouse:down"] = [];
-    canvas.__eventListeners["mouse:move"] = [];
-    canvas.__eventListeners["mouse:up"] = [];
-    canvas.__eventListeners["mouse:wheel"] = [];
+    const selectable = tool === "select";
+    canvas.forEachObject((obj) => (obj.selectable = selectable));
 
-    if (tool === "select") {
-      canvas.selection = true;
-      canvas.forEachObject((obj: FabricObject) => {
-        obj.selectable = true;
-      });
-    } else if (tool === "grab") {
-      canvas.selection = false;
-      canvas.forEachObject((obj: FabricObject) => {
-        obj.selectable = false;
-      });
+    canvas.selection = tool === "select";
 
+    // Always attach zoom and bounds checking
+    handlers.current["mouse:move-check"] = checkBounds;
+    handlers.current["mouse:wheel"] = handleZoom;
+    canvas.on("mouse:move", checkBounds);
+    canvas.on("mouse:wheel", handleZoom);
+
+    if (tool === "grab") {
       canvas.on("mouse:down", startPanning);
       canvas.on("mouse:move", panCanvas);
       canvas.on("mouse:up", stopPanning);
-    } else {
       canvas.selection = false;
-      canvas.forEachObject((obj: FabricObject) => {
-        obj.selectable = false;
-      });
+    } else if (tool === "rect" || tool === "circle") {
+      canvas.on("mouse:down", startShapeDraw);
+      canvas.on("mouse:move", drawShape);
+      canvas.on("mouse:up", stopShapeDraw);
+      canvas.selection = false;
     }
 
-    canvas.on("mouse:move", checkCanvasBounds);
-    canvas.on("mouse:wheel", handleZoom);
+    canvas.requestRenderAll();
   }, [
     canvas,
     tool,
     startPanning,
     panCanvas,
     stopPanning,
-    checkCanvasBounds,
+    checkBounds,
     handleZoom,
+    startShapeDraw,
+    drawShape,
+    stopShapeDraw,
   ]);
 
   const zoomIn = () => {
     if (!canvas) return;
-    let zoom = canvas.getZoom();
-    zoom = Math.min(5, zoom * 1.1);
-    const centerX = canvas.getWidth() / 2;
-    const centerY = canvas.getHeight() / 2;
-    const point = new Point(centerX, centerY);
-    canvas.zoomToPoint(point, zoom);
+    const zoom = Math.min(5, canvas.getZoom() * 1.1);
+    canvas.zoomToPoint(
+      new Point(canvas.getWidth() / 2, canvas.getHeight() / 2),
+      zoom,
+    );
     setZoomPercentage(Math.round(zoom * 100));
   };
 
   const zoomOut = () => {
     if (!canvas) return;
-    let zoom = canvas.getZoom();
-    zoom = Math.max(0.05, zoom / 1.1);
-    const centerX = canvas.getWidth() / 2;
-    const centerY = canvas.getHeight() / 2;
-    const point = new Point(centerX, centerY);
-    canvas.zoomToPoint(point, zoom);
+    const zoom = Math.max(0.05, canvas.getZoom() / 1.1);
+    canvas.zoomToPoint(
+      new Point(canvas.getWidth() / 2, canvas.getHeight() / 2),
+      zoom,
+    );
     setZoomPercentage(Math.round(zoom * 100));
   };
 
   return (
     <div className="w-screen h-screen overflow-hidden bg-gray-100">
-      <Toolbar setTool={setTool} />
+      <Toolbar
+        setTool={setTool}
+        brushColor={brushColor}
+        setBrushColor={setBrushColor}
+        activeTool={tool}
+      />
+
       <div className="absolute top-4 right-4 z-10 flex items-center gap-2 bg-white px-4 py-2 rounded-lg shadow-md">
         <button
           onClick={zoomIn}
@@ -250,6 +399,7 @@ const Whiteboard: React.FC = () => {
           Zoom: {zoomPercentage}%
         </span>
       </div>
+
       <canvas ref={canvasRef} className="border border-gray-300" />
     </div>
   );
