@@ -15,6 +15,7 @@ const Whiteboard: React.FC = () => {
   const isDragging = useRef<boolean>(false);
   const lastPosX = useRef<number>(0);
   const lastPosY = useRef<number>(0);
+  const [brushColor, setBrushColor] = useState<string>("#000000"); // Default to black
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -28,11 +29,14 @@ const Whiteboard: React.FC = () => {
       // if Typescript complains that PencilBrush isn't compatible with freeDrawingBrush.
       fabricCanvas.freeDrawingBrush = new PencilBrush(fabricCanvas);
     }
-    fabricCanvas.freeDrawingBrush!.color = "#000000"; // Black color
+    fabricCanvas.freeDrawingBrush!.color = brushColor; // Black color
+
     fabricCanvas.freeDrawingBrush!.width = 5; // 5px wide line
     const resizeCanvas = () => {
-      fabricCanvas.setWidth(window.innerWidth - 20);
-      fabricCanvas.setHeight(window.innerHeight - 70);
+      fabricCanvas.setDimensions({
+        width: window.innerWidth - 20,
+        height: window.innerHeight - 70,
+      });
       fabricCanvas.renderAll();
     };
 

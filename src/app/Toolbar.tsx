@@ -1,4 +1,5 @@
 import React from "react";
+import FloatingPanelComponent from "./components/floatingpanel";
 
 interface ToolbarProps {
   setTool: (tool: string) => void;
@@ -25,6 +26,11 @@ const Toolbar: React.FC<ToolbarProps> = ({ setTool }) => {
       >
         Grab
       </button>
+
+      <FloatingPanelComponent
+        triggerText="Pick color"
+        triggerClasses="px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition-colors font-medium"
+      />
     </div>
   );
 };
