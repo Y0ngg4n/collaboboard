@@ -307,11 +307,11 @@ const Whiteboard: React.FC = () => {
   useEffect(() => {
     if (!canvas) return;
 
-    // Remove all existing handlers
-    Object.entries(handlers.current).forEach(([name, fn]) =>
-      canvas.off(name as any, fn),
-    );
-    handlers.current = {};
+    // Remove all handlers
+    canvas.off("mouse:down");
+    canvas.off("mouse:move");
+    canvas.off("mouse:up");
+    canvas.off("mouse:wheel");
 
     canvas.isDrawingMode = tool === "draw";
     canvas.defaultCursor = tool === "grab" ? "grab" : "default";
@@ -322,8 +322,6 @@ const Whiteboard: React.FC = () => {
     canvas.selection = tool === "select";
 
     // Always attach zoom and bounds checking
-    handlers.current["mouse:move-check"] = checkBounds;
-    handlers.current["mouse:wheel"] = handleZoom;
     canvas.on("mouse:move", checkBounds);
     canvas.on("mouse:wheel", handleZoom);
 
