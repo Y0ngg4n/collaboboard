@@ -1,0 +1,46 @@
+/* src/styles/Whiteboard.css */
+.whiteboard-container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    overflow: hidden;
+    border: 0px solid black;
+    box-sizing: border-box; /* Include border in the element's total width and height */
+}
+
+canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+.toolbar {
+    position: fixed; /* Use fixed to make it floating */
+    top: 10px; /* Center vertically with a top margin */
+    left: 50%; /* Center horizontally */
+    transform: translateX(-50%); /* Adjust to truly center */
+    background-color: #f1f1f1;
+    padding: 10px;
+    display: flex;
+    gap: 10px;
+    z-index: 1;
+    border-bottom: 1px solid #ccc;
+    box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.2); /* Add black shadow */
+    margin: 5px; /* Add margin */
+    width: auto; /* Ensure width wraps content */
+    white-space: nowrap; /* Prevent wrapping */
+}
+
+.toolbar button {
+    padding: 10px;
+    border: none;
+    background-color: #007bff;
+    color: white;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.toolbar button:hover {
+    background-color: #0056b3;
+}
