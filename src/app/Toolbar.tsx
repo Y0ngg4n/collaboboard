@@ -1,6 +1,5 @@
 // Toolbar.tsx
 "use client";
-
 import React from "react";
 import {
   Popover,
@@ -8,16 +7,34 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import ColorPickerComponent from "./components/ColorPickerComponent";
+import {
+  Pencil,
+  MousePointer2,
+  Hand,
+  Square,
+  Circle,
+  Eraser,
+  Trash2,
+} from "lucide-react";
 
-import { Pencil, MousePointer2, Hand, Square, Circle } from "lucide-react";
-
-export type ToolType = "draw" | "select" | "grab" | "rect" | "circle";
+export type ToolType =
+  | "draw"
+  | "select"
+  | "grab"
+  | "rect"
+  | "circle"
+  | "eraser";
 
 interface ToolbarProps {
   setTool: (tool: ToolType) => void;
   brushColor: string;
   setBrushColor: (hex: string) => void;
   activeTool: ToolType;
+  fillShapes: boolean;
+  setFillShapes: (fill: boolean) => void;
+  onClearCanvas: () => void;
+  eraserMode: "draw" | "object";
+  setEraserMode: (mode: "draw" | "object") => void;
 }
 
 const Toolbar: React.FC<ToolbarProps> = ({
@@ -25,6 +42,11 @@ const Toolbar: React.FC<ToolbarProps> = ({
   brushColor,
   setBrushColor,
   activeTool,
+  fillShapes,
+  setFillShapes,
+  onClearCanvas,
+  eraserMode,
+  setEraserMode,
 }) => {
   const ToolButton: React.FC<{
     tool: ToolType;
@@ -52,6 +74,7 @@ const Toolbar: React.FC<ToolbarProps> = ({
         icon={<Pencil size={20} />}
         label="Draw (Pencil)"
       />
+      <ToolButton tool="eraser" icon={<Eraser size={20} />} label="Eraser" />
       <ToolButton
         tool="select"
         icon={<MousePointer2 size={20} />}
@@ -61,6 +84,25 @@ const Toolbar: React.FC<ToolbarProps> = ({
 
       {/* Separator */}
       <div className="w-px h-6 bg-gray-200 mx-1" />
+
+      {/* Eraser Mode Toggle - only show when eraser is active */}
+      {activeTool === "eraser" && (
+        <>
+          <button
+            onClick={() =>
+              setEraserMode(eraserMode === "draw" ? "object" : "draw")
+            }
+            className={`px-3 py-2 rounded-md text-xs font-medium transition-colors ${
+              eraserMode === "draw"
+                ? "bg-purple-500 text-white"
+                : "bg-orange-500 text-white"
+            }`}
+            title="Toggle Eraser Mode"
+          >
+            {eraserMode === "draw" ? "Draw Erase" : "Object Erase"}
+          </button>
+        </>
+      )}
 
       {/* Shape Drawing Tools */}
       <ToolButton
@@ -77,6 +119,24 @@ const Toolbar: React.FC<ToolbarProps> = ({
       {/* Separator */}
       <div className="w-px h-6 bg-gray-200 mx-1" />
 
+      {/* Fill Toggle - only show when rect or circle is active */}
+      {(activeTool === "rect" || activeTool === "circle") && (
+        <>
+          <button
+            onClick={() => setFillShapes(!fillShapes)}
+            className={`px-3 py-2 rounded-md text-xs font-medium transition-colors ${
+              fillShapes
+                ? "bg-blue-500 text-white"
+                : "bg-white text-gray-600 border border-gray-300"
+            }`}
+            title="Toggle Fill"
+          >
+            {fillShapes ? "Filled" : "Outline"}
+          </button>
+          <div className="w-px h-6 bg-gray-200 mx-1" />
+        </>
+      )}
+
       {/* Color Picker Popover */}
       <Popover>
         <PopoverTrigger asChild>
@@ -90,6 +150,18 @@ const Toolbar: React.FC<ToolbarProps> = ({
           <ColorPickerComponent color={brushColor} onChange={setBrushColor} />
         </PopoverContent>
       </Popover>
+
+      {/* Separator */}
+      <div className="w-px h-6 bg-gray-200 mx-1" />
+
+      {/* Clear All Button */}
+      <button
+        onClick={onClearCanvas}
+        className="p-2 rounded-md bg-red-500 text-white hover:bg-red-600 transition-colors"
+        title="Clear All"
+      >
+        <Trash2 size={20} />
+      </button>
     </div>
   );
 };
