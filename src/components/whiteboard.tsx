@@ -34,6 +34,83 @@ interface WhiteboardProps {
   uuid: string;
 }
 
+// Simple E2E encryption utilities using Web Crypto API
+class E2EEncryption {
+  private static async deriveKey(
+    password: string,
+    salt: Uint8Array,
+  ): Promise<CryptoKey> {
+    const encoder = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(password),
+      { name: "PBKDF2" },
+      false,
+      ["deriveKey"],
+    );
+
+    return crypto.subtle.deriveKey(
+      {
+        name: "PBKDF2",
+        salt,
+        iterations: 100000,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"],
+    );
+  }
+
+  static async encrypt(data: string, password: string): Promise<string> {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await this.deriveKey(password, salt);
+
+    const encoder = new TextEncoder();
+    const encrypted = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      key,
+      encoder.encode(data),
+    );
+
+    // Combine salt + iv + encrypted data
+    const combined = new Uint8Array(
+      salt.length + iv.length + encrypted.byteLength,
+    );
+    combined.set(salt, 0);
+    combined.set(iv, salt.length);
+    combined.set(new Uint8Array(encrypted), salt.length + iv.length);
+
+    return btoa(String.fromCharCode(...combined));
+  }
+
+  static async decrypt(
+    encryptedData: string,
+    password: string,
+  ): Promise<string> {
+    const combined = Uint8Array.from(atob(encryptedData), (c) =>
+      c.charCodeAt(0),
+    );
+
+    const salt = combined.slice(0, 16);
+    const iv = combined.slice(16, 28);
+    const data = combined.slice(28);
+
+    const key = await this.deriveKey(password, salt);
+
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      data,
+    );
+
+    const decoder = new TextDecoder();
+    return decoder.decode(decrypted);
+  }
+}
+
 export default function Whiteboard({ uuid }: WhiteboardProps) {
   const excalidrawRef = React.useRef<HTMLDivElement>(null);
   const apiRef = React.useRef<any>(null);
@@ -48,11 +125,14 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
   const [shareUrl, setShareUrl] = React.useState("");
   const [ExcalidrawComponents, setExcalidrawComponents] =
     React.useState<any>(null);
+  const [encryptionKey, setEncryptionKey] = React.useState<string>("");
+  const [isSaving, setIsSaving] = React.useState(false);
 
   const router = useRouter();
   const searchParams = useSearchParams();
 
   const LOCAL_STORAGE_KEY = `whiteboard-${uuid}`;
+  const ENCRYPTION_KEY_STORAGE = `whiteboard-key-${uuid}`;
 
   // Load Excalidraw components dynamically
   React.useEffect(() => {
@@ -61,22 +141,61 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     });
   }, []);
 
-  // Load from URL data parameter if exists
+  // Load encryption key from localStorage or generate new one
   React.useEffect(() => {
-    const dataParam = searchParams.get("data");
-    if (dataParam && apiRef.current) {
-      try {
-        const decompressed = JSON.parse(decodeURIComponent(atob(dataParam)));
-        apiRef.current.updateScene({
-          elements: decompressed,
-          commitToHistory: false,
-        });
-        console.log("✅ Loaded data from URL");
-      } catch (err) {
-        console.warn("Failed to decode URL data", err);
-      }
+    const savedKey = localStorage.getItem(ENCRYPTION_KEY_STORAGE);
+    if (savedKey) {
+      setEncryptionKey(savedKey);
+    } else {
+      // Generate a new encryption key (random 32 character string)
+      const newKey = Array.from(crypto.getRandomValues(new Uint8Array(32)))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+      setEncryptionKey(newKey);
+      localStorage.setItem(ENCRYPTION_KEY_STORAGE, newKey);
     }
-  }, [searchParams]);
+  }, [uuid]);
+
+  // Load saved whiteboard from server on mount
+  React.useEffect(() => {
+    if (!encryptionKey) return;
+
+    const loadWhiteboard = async () => {
+      try {
+        const response = await fetch(`/api/whiteboard/${uuid}`);
+        if (response.ok) {
+          const { encryptedData } = await response.json();
+          const decrypted = await E2EEncryption.decrypt(
+            encryptedData,
+            encryptionKey,
+          );
+          const elements = JSON.parse(decrypted);
+
+          if (apiRef.current && elements.length > 0) {
+            apiRef.current.updateScene({
+              elements,
+              commitToHistory: false,
+            });
+          }
+
+          // Also populate Yjs
+          if (yElementsRef.current) {
+            elements.forEach((el: any) => {
+              const map = new Y.Map();
+              Object.entries(el).forEach(([k, v]) => map.set(k, v));
+              yElementsRef.current!.push([map]);
+            });
+          }
+
+          console.log("✅ Loaded encrypted whiteboard from server");
+        }
+      } catch (err) {
+        console.warn("Failed to load whiteboard:", err);
+      }
+    };
+
+    loadWhiteboard();
+  }, [uuid, encryptionKey]);
 
   // Initialize Yjs + WebRTC
   React.useEffect(() => {
@@ -85,21 +204,6 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     const ydoc = new Y.Doc();
     const yElements = ydoc.getArray<Y.Map<any>>("elements");
     const yAssets = ydoc.getMap("assets");
-
-    // Load saved elements from localStorage
-    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        parsed.forEach((el: any) => {
-          const map = new Y.Map();
-          Object.entries(el).forEach(([k, v]) => map.set(k, v));
-          yElements.push([map]);
-        });
-      } catch (err) {
-        console.warn("Failed to load saved whiteboard", err);
-      }
-    }
 
     const provider = new WebrtcProvider(uuid, ydoc, {
       signaling: ["ws://127.0.0.1:4444"],
@@ -131,14 +235,6 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     provider.awareness.on("update", () => {
       const states = provider.awareness.getStates();
       setPeerCount(states.size);
-      console.log("📡 Awareness update:", Array.from(states.entries()));
-
-      if (yElementsRef.current) {
-        console.log(
-          "🖊️ Excalidraw JSON:",
-          yjsToExcalidraw(yElementsRef.current),
-        );
-      }
     });
 
     provider.awareness.setLocalStateField("user", {
@@ -151,16 +247,6 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     providerRef.current = provider;
     yElementsRef.current = yElements;
     yAssetsRef.current = yAssets;
-
-    provider.once("synced", () => {
-      console.log("✅ Yjs initial sync done");
-      if (apiRef.current && yElementsRef.current) {
-        const elements = yjsToExcalidraw(yElementsRef.current);
-        if (elements.length > 0) {
-          apiRef.current.updateScene({ elements, commitToHistory: false });
-        }
-      }
-    });
 
     return () => provider.destroy();
   }, [uuid]);
@@ -183,65 +269,58 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
 
     bindingRef.current = binding;
 
-    apiRef.current.onChange = () => {
-      if (yElementsRef.current) {
-        localStorage.setItem(
-          LOCAL_STORAGE_KEY,
-          JSON.stringify(yjsToExcalidraw(yElementsRef.current)),
-        );
-      }
-    };
-
     return () => {
       bindingRef.current?.destroy();
       bindingRef.current = null;
     };
   }, [apiRef.current, uuid]);
 
-  const handleShare = () => {
-    if (!yElementsRef.current) return;
+  const saveWhiteboard = async () => {
+    if (!yElementsRef.current || !encryptionKey) return;
 
-    const elements = yjsToExcalidraw(yElementsRef.current);
-    const baseUrl = `${window.location.origin}/whiteboard/${uuid}`;
-
+    setIsSaving(true);
     try {
-      const compressed = btoa(encodeURIComponent(JSON.stringify(elements)));
-      const urlWithData = `${baseUrl}?data=${compressed}`;
+      const elements = yjsToExcalidraw(yElementsRef.current);
+      const data = JSON.stringify(elements);
 
-      if (urlWithData.length <= 2000) {
-        setShareUrl(urlWithData);
+      // Encrypt the data
+      const encrypted = await E2EEncryption.encrypt(data, encryptionKey);
+
+      // Save to server
+      const response = await fetch(`/api/whiteboard/${uuid}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ encryptedData: encrypted }),
+      });
+
+      if (response.ok) {
+        console.log("✅ Whiteboard saved (encrypted)");
+        alert("✅ Whiteboard saved!");
       } else {
-        setShareUrl(baseUrl);
+        throw new Error("Failed to save");
       }
     } catch (err) {
-      console.error("Failed to generate share URL", err);
-      setShareUrl(baseUrl);
+      console.error("Failed to save whiteboard:", err);
+      alert("❌ Failed to save whiteboard");
+    } finally {
+      setIsSaving(false);
     }
-
-    document.getElementById("share_modal")?.showModal();
   };
 
-  const handleLoadFromUrl = () => {
-    const dataParam = searchParams.get("data");
-    if (dataParam && apiRef.current) {
-      try {
-        const decompressed = JSON.parse(decodeURIComponent(atob(dataParam)));
-        apiRef.current.updateScene({
-          elements: decompressed,
-          commitToHistory: true,
-        });
-        alert("✅ Loaded whiteboard data from URL!");
-      } catch (err) {
-        alert("❌ Failed to decode URL data");
-      }
-    } else {
-      alert("ℹ️ No data parameter found in URL");
-    }
+  const handleShare = () => {
+    const baseUrl = `${window.location.origin}/whiteboard/${uuid}`;
+    setShareUrl(baseUrl);
+    document.getElementById("share_modal")?.showModal();
   };
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(shareUrl);
     alert("📋 URL copied to clipboard!");
+  };
+
+  const copyEncryptionKey = () => {
+    navigator.clipboard.writeText(encryptionKey);
+    alert("🔑 Encryption key copied! Share this with collaborators.");
   };
 
   if (!ExcalidrawComponents) {
@@ -266,22 +345,21 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
           }}
           renderTopRightUI={() => (
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              {searchParams.get("data") && (
-                <button
-                  onClick={handleLoadFromUrl}
-                  style={{
-                    padding: "4px 12px",
-                    borderRadius: "4px",
-                    background: "#e3e3e3",
-                    color: "#333",
-                    border: "none",
-                    cursor: "pointer",
-                    fontSize: "14px",
-                  }}
-                >
-                  Load URL Data
-                </button>
-              )}
+              <button
+                onClick={saveWhiteboard}
+                disabled={isSaving}
+                style={{
+                  padding: "4px 12px",
+                  borderRadius: "4px",
+                  background: isSaving ? "#ccc" : "#4CAF50",
+                  color: "white",
+                  border: "none",
+                  cursor: isSaving ? "not-allowed" : "pointer",
+                  fontSize: "14px",
+                }}
+              >
+                {isSaving ? "Saving..." : "💾 Save"}
+              </button>
               <LiveCollaborationTrigger
                 isCollaborating={isCollaborating}
                 onSelect={handleShare}
@@ -367,18 +445,35 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
                 readOnly
                 className="input input-bordered flex-1 text-sm"
               />
-              <button
-                onClick={copyToClipboard}
-                className="btn btn-primary btn-outline"
-              >
+              <button onClick={copyToClipboard} className="btn btn-primary">
                 Copy
               </button>
             </div>
+          </div>
+
+          <div className="form-control mb-4">
             <label className="label">
-              <span className="label-text-alt">
-                {shareUrl.length > 2000
-                  ? "⚠️ Data too large - sharing UUID only"
-                  : "✅ URL includes whiteboard data"}
+              <span className="label-text">
+                🔑 Encryption Key (share separately):
+              </span>
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={encryptionKey}
+                readOnly
+                className="input input-bordered flex-1 text-sm font-mono"
+              />
+              <button
+                onClick={copyEncryptionKey}
+                className="btn btn-secondary btn-outline"
+              >
+                Copy Key
+              </button>
+            </div>
+            <label className="label">
+              <span className="label-text-alt text-warning">
+                ⚠️ Keep this key secret! It's needed to decrypt the whiteboard.
               </span>
             </label>
           </div>
