@@ -367,7 +367,10 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
                 readOnly
                 className="input input-bordered flex-1 text-sm"
               />
-              <button onClick={copyToClipboard} className="btn btn-primary">
+              <button
+                onClick={copyToClipboard}
+                className="btn btn-primary btn-outline"
+              >
                 Copy
               </button>
             </div>
