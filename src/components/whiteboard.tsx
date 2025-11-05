@@ -45,7 +45,6 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
 
   const [isCollaborating, setIsCollaborating] = React.useState(false);
   const [peerCount, setPeerCount] = React.useState(1);
-  const [showShareModal, setShowShareModal] = React.useState(false);
   const [shareUrl, setShareUrl] = React.useState("");
   const [ExcalidrawComponents, setExcalidrawComponents] =
     React.useState<any>(null);
@@ -219,7 +218,7 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
       setShareUrl(baseUrl);
     }
 
-    setShowShareModal(true);
+    document.getElementById("share_modal")?.showModal();
   };
 
   const handleLoadFromUrl = () => {
@@ -300,7 +299,10 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
         >
           <Menu>
             <Menu.Group title="File & Canvas">
+              <Menu.DefaultItems.LoadScene />
               <Menu.DefaultItems.SaveAsImage />
+              <Menu.DefaultItems.SaveToActiveFile />
+              <Menu.DefaultItems.Export />
               <Menu.DefaultItems.SearchMenu />
               <Menu.DefaultItems.ClearCanvas />
             </Menu.Group>
@@ -309,6 +311,8 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
               <Menu.DefaultItems.ToggleTheme />
               <Menu.DefaultItems.ChangeCanvasBackground />
             </Menu.Group>
+
+            <Menu.DefaultItems.Help />
           </Menu>
 
           {(!yElementsRef.current || yElementsRef.current.length === 0) && (
@@ -338,59 +342,48 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
       </div>
 
       {/* DaisyUI Share Modal */}
-      {showShareModal && (
-        <>
-          <input
-            type="checkbox"
-            id="share-modal"
-            className="modal-toggle"
-            checked={showShareModal}
-            readOnly
-          />
-          <div className="modal modal-open">
-            <div className="modal-box">
-              <h3 className="font-bold text-lg mb-4">Share Whiteboard</h3>
+      <dialog id="share_modal" className="modal">
+        <div className="modal-box">
+          <form method="dialog">
+            <button className="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">
+              ✕
+            </button>
+          </form>
 
-              <div className="flex justify-center mb-4">
-                <QRCodeSVG value={shareUrl} size={192} />
-              </div>
+          <h3 className="font-bold text-lg mb-4">Share Whiteboard</h3>
 
-              <div className="form-control mb-4">
-                <label className="label">
-                  <span className="label-text">Share URL:</span>
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={shareUrl}
-                    readOnly
-                    className="input input-bordered flex-1 text-sm"
-                  />
-                  <button onClick={copyToClipboard} className="btn btn-primary">
-                    Copy
-                  </button>
-                </div>
-                <label className="label">
-                  <span className="label-text-alt">
-                    {shareUrl.length > 2000
-                      ? "⚠️ Data too large - sharing UUID only"
-                      : "✅ URL includes whiteboard data"}
-                  </span>
-                </label>
-              </div>
-
-              <div className="modal-action">
-                <button
-                  onClick={() => setShowShareModal(false)}
-                  className="btn"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
+          <div className="flex justify-center mb-4">
+            <QRCodeSVG value={shareUrl} size={192} />
           </div>
-        </>
-      )}
+
+          <div className="form-control mb-4">
+            <label className="label">
+              <span className="label-text">Share URL:</span>
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={shareUrl}
+                readOnly
+                className="input input-bordered flex-1 text-sm"
+              />
+              <button onClick={copyToClipboard} className="btn btn-primary">
+                Copy
+              </button>
+            </div>
+            <label className="label">
+              <span className="label-text-alt">
+                {shareUrl.length > 2000
+                  ? "⚠️ Data too large - sharing UUID only"
+                  : "✅ URL includes whiteboard data"}
+              </span>
+            </label>
+          </div>
+        </div>
+        <form method="dialog" className="modal-backdrop">
+          <button>close</button>
+        </form>
+      </dialog>
     </>
   );
 }
