@@ -1,4 +1,5 @@
 "use client";
+"use client";
 
 import * as React from "react";
 import * as Y from "yjs";
@@ -7,24 +8,21 @@ import "@excalidraw/excalidraw/index.css";
 import { ExcalidrawBinding, yjsToExcalidraw } from "y-excalidraw";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
-import { QRCodeSVG } from "qrcode.react";
+import E2EEncryption from "@/lib/E2EEncryption";
 
 // Dynamic imports for Excalidraw components
 const Excalidraw = dynamic(
   async () => (await import("@excalidraw/excalidraw")).Excalidraw,
   { ssr: false },
 );
-
 const MainMenu = dynamic(
   async () => (await import("@excalidraw/excalidraw")).MainMenu,
   { ssr: false },
 );
-
 const WelcomeScreen = dynamic(
   async () => (await import("@excalidraw/excalidraw")).WelcomeScreen,
   { ssr: false },
 );
-
 const LiveCollaborationTrigger = dynamic(
   async () => (await import("@excalidraw/excalidraw")).LiveCollaborationTrigger,
   { ssr: false },
@@ -32,83 +30,6 @@ const LiveCollaborationTrigger = dynamic(
 
 interface WhiteboardProps {
   uuid: string;
-}
-
-// Simple E2E encryption utilities using Web Crypto API
-class E2EEncryption {
-  private static async deriveKey(
-    password: string,
-    salt: Uint8Array,
-  ): Promise<CryptoKey> {
-    const encoder = new TextEncoder();
-    const keyMaterial = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(password),
-      { name: "PBKDF2" },
-      false,
-      ["deriveKey"],
-    );
-
-    return crypto.subtle.deriveKey(
-      {
-        name: "PBKDF2",
-        salt,
-        iterations: 100000,
-        hash: "SHA-256",
-      },
-      keyMaterial,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"],
-    );
-  }
-
-  static async encrypt(data: string, password: string): Promise<string> {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const key = await this.deriveKey(password, salt);
-
-    const encoder = new TextEncoder();
-    const encrypted = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
-      key,
-      encoder.encode(data),
-    );
-
-    // Combine salt + iv + encrypted data
-    const combined = new Uint8Array(
-      salt.length + iv.length + encrypted.byteLength,
-    );
-    combined.set(salt, 0);
-    combined.set(iv, salt.length);
-    combined.set(new Uint8Array(encrypted), salt.length + iv.length);
-
-    return btoa(String.fromCharCode(...combined));
-  }
-
-  static async decrypt(
-    encryptedData: string,
-    password: string,
-  ): Promise<string> {
-    const combined = Uint8Array.from(atob(encryptedData), (c) =>
-      c.charCodeAt(0),
-    );
-
-    const salt = combined.slice(0, 16);
-    const iv = combined.slice(16, 28);
-    const data = combined.slice(28);
-
-    const key = await this.deriveKey(password, salt);
-
-    const decrypted = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv },
-      key,
-      data,
-    );
-
-    const decoder = new TextDecoder();
-    return decoder.decode(decrypted);
-  }
 }
 
 export default function Whiteboard({ uuid }: WhiteboardProps) {
@@ -119,6 +40,8 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
   const providerRef = React.useRef<WebrtcProvider | null>(null);
   const yElementsRef = React.useRef<Y.Array<Y.Map<any>> | null>(null);
   const yAssetsRef = React.useRef<Y.Map<any> | null>(null);
+  const autoSaveTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+  const hasChangesRef = React.useRef(false);
 
   const [isCollaborating, setIsCollaborating] = React.useState(false);
   const [peerCount, setPeerCount] = React.useState(1);
@@ -127,77 +50,49 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     React.useState<any>(null);
   const [encryptionKey, setEncryptionKey] = React.useState<string>("");
   const [isSaving, setIsSaving] = React.useState(false);
+  const [isLoading, setIsLoading] = React.useState(true);
+  const [lastSaved, setLastSaved] = React.useState<Date | null>(null);
+  const [saveStatus, setSaveStatus] = React.useState<
+    "saved" | "saving" | "unsaved"
+  >("saved");
 
-  const router = useRouter();
   const searchParams = useSearchParams();
-
-  const LOCAL_STORAGE_KEY = `whiteboard-${uuid}`;
-  const ENCRYPTION_KEY_STORAGE = `whiteboard-key-${uuid}`;
 
   // Load Excalidraw components dynamically
   React.useEffect(() => {
-    import("@excalidraw/excalidraw").then((module) => {
-      setExcalidrawComponents(module);
-    });
+    import("@excalidraw/excalidraw").then(setExcalidrawComponents);
   }, []);
 
-  // Load encryption key from localStorage or generate new one
+  // Generate or load encryption key from URL
   React.useEffect(() => {
-    const savedKey = localStorage.getItem(ENCRYPTION_KEY_STORAGE);
-    if (savedKey) {
-      setEncryptionKey(savedKey);
+    const urlKey = searchParams.get("key");
+    if (urlKey) {
+      setEncryptionKey(urlKey);
     } else {
-      // Generate a new encryption key (random 32 character string)
       const newKey = Array.from(crypto.getRandomValues(new Uint8Array(32)))
         .map((b) => b.toString(16).padStart(2, "0"))
         .join("");
       setEncryptionKey(newKey);
-      localStorage.setItem(ENCRYPTION_KEY_STORAGE, newKey);
+      const newUrl = new URL(window.location.href);
+      newUrl.searchParams.set("key", newKey);
+      window.history.replaceState(null, "", newUrl.toString());
     }
-  }, [uuid]);
+  }, [uuid, searchParams]);
 
-  // Load saved whiteboard from server on mount
+  // Auto-update share URL whenever key changes
   React.useEffect(() => {
-    if (!encryptionKey) return;
+    setShareUrl(
+      `${window.location.origin}/whiteboard/${uuid}?key=${encryptionKey}`,
+    );
+  }, [encryptionKey, uuid]);
 
-    const loadWhiteboard = async () => {
-      try {
-        const response = await fetch(`/api/whiteboard/${uuid}`);
-        if (response.ok) {
-          const { encryptedData } = await response.json();
-          const decrypted = await E2EEncryption.decrypt(
-            encryptedData,
-            encryptionKey,
-          );
-          const elements = JSON.parse(decrypted);
+  // Safe element filter
+  const safeElements = (elements: any[]) =>
+    Array.isArray(elements)
+      ? elements.filter((el) => el && typeof el === "object" && "id" in el)
+      : [];
 
-          if (apiRef.current && elements.length > 0) {
-            apiRef.current.updateScene({
-              elements,
-              commitToHistory: false,
-            });
-          }
-
-          // Also populate Yjs
-          if (yElementsRef.current) {
-            elements.forEach((el: any) => {
-              const map = new Y.Map();
-              Object.entries(el).forEach(([k, v]) => map.set(k, v));
-              yElementsRef.current!.push([map]);
-            });
-          }
-
-          console.log("✅ Loaded encrypted whiteboard from server");
-        }
-      } catch (err) {
-        console.warn("Failed to load whiteboard:", err);
-      }
-    };
-
-    loadWhiteboard();
-  }, [uuid, encryptionKey]);
-
-  // Initialize Yjs + WebRTC
+  // Init Yjs + WebRTC first
   React.useEffect(() => {
     if (ydocRef.current) return;
 
@@ -208,39 +103,25 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     const provider = new WebrtcProvider(uuid, ydoc, {
       signaling: ["ws://127.0.0.1:4444"],
       peerOpts: {
-        config: {
-          iceServers: [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:3478" },
-            { urls: "stun:stunserver2024.stunprotocol.org:3478" },
-            {
-              urls: "turn:openrelay.metered.ca:80",
-              username: "openrelayproject",
-              credential: "openrelayproject",
-            },
-            {
-              urls: "turn:staticauth.openrelay.metered.ca:443",
-              username: "openrelayproject",
-              credential: "openrelayprojectsecret",
-            },
-          ],
-        },
+        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
       },
     });
 
-    provider.on("status", ({ connected }: { connected: boolean }) => {
-      setIsCollaborating(connected);
-    });
-
-    provider.awareness.on("update", () => {
-      const states = provider.awareness.getStates();
-      setPeerCount(states.size);
-    });
+    provider.on("status", ({ connected }) => setIsCollaborating(connected));
+    provider.awareness.on("update", () =>
+      setPeerCount(provider.awareness.getStates().size),
+    );
 
     provider.awareness.setLocalStateField("user", {
       name: "Anonymous " + Math.floor(Math.random() * 100),
       color: "#30bced",
       colorLight: "#30bced33",
+    });
+
+    // Track changes to Yjs document
+    yElements.observe(() => {
+      hasChangesRef.current = true;
+      setSaveStatus("unsaved");
     });
 
     ydocRef.current = ydoc;
@@ -251,91 +132,196 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     return () => provider.destroy();
   }, [uuid]);
 
+  // Load saved whiteboard from server **before binding**
+  // Load saved whiteboard from server
+  React.useEffect(() => {
+    if (!encryptionKey || !yElementsRef.current) return;
+
+    const loadWhiteboard = async () => {
+      try {
+        setIsLoading(true);
+        const response = await fetch(`/api/whiteboard/${uuid}`);
+        if (response.ok) {
+          const { encryptedData } = await response.json();
+          const decrypted = await E2EEncryption.decrypt(
+            encryptedData,
+            encryptionKey,
+          );
+          const elements = JSON.parse(decrypted);
+          const filtered = safeElements(elements);
+          if (yElementsRef.current != null) {
+            yElementsRef.current.doc?.transact(() => {
+              yElementsRef.current!.delete(0, yElementsRef.current!.length);
+              filtered.forEach((el) => {
+                const map = new Y.Map();
+                Object.entries(el).forEach(([k, v]) => map.set(k, v));
+                yElementsRef.current!.push([map]);
+              });
+            });
+          }
+          // Update Excalidraw only if API exists
+          if (apiRef.current && filtered.length > 0) {
+            apiRef.current.updateScene({
+              elements: filtered,
+              commitToHistory: false,
+            });
+          }
+        }
+      } catch (err) {
+        console.warn("Failed to load whiteboard:", err);
+      } finally {
+        // ✅ Always set loading to false
+        setIsLoading(false);
+      }
+    };
+
+    loadWhiteboard();
+  }, [uuid, encryptionKey]);
+
+  // Initialize ExcalidrawBinding after API is ready AND server load is done
   // Initialize ExcalidrawBinding
   React.useEffect(() => {
     if (!apiRef.current || bindingRef.current) return;
     if (!ydocRef.current || !providerRef.current) return;
+    if (!yElementsRef.current || !yAssetsRef.current) return;
 
-    const binding = new ExcalidrawBinding(
-      yElementsRef.current!,
-      yAssetsRef.current!,
-      apiRef.current,
-      providerRef.current.awareness,
-      {
-        excalidrawDom: excalidrawRef.current!,
-        undoManager: new Y.UndoManager(yElementsRef.current!),
-      },
-    );
-
-    bindingRef.current = binding;
+    try {
+      const binding = new ExcalidrawBinding(
+        yElementsRef.current,
+        yAssetsRef.current,
+        apiRef.current,
+        providerRef.current.awareness,
+        {
+          excalidrawDom: excalidrawRef.current!,
+          undoManager: new Y.UndoManager(yElementsRef.current),
+        },
+      );
+      bindingRef.current = binding;
+      console.log("✅ ExcalidrawBinding initialized");
+    } catch (err) {
+      console.error("Failed to initialize ExcalidrawBinding:", err);
+    }
 
     return () => {
       bindingRef.current?.destroy();
       bindingRef.current = null;
     };
-  }, [apiRef.current, uuid]);
+  }, [
+    apiRef.current,
+    ydocRef.current,
+    providerRef.current,
+    yElementsRef.current,
+    yAssetsRef.current,
+  ]);
 
-  const saveWhiteboard = async () => {
+  const toast = (
+    message: string,
+    type: "success" | "error" | "info" = "success",
+  ) => {
+    const toastEl = document.createElement("div");
+    const bgColor =
+      type === "success"
+        ? "bg-success"
+        : type === "error"
+          ? "bg-error"
+          : "bg-info";
+    toastEl.className = `alert ${bgColor} text-white fixed bottom-4 right-4 w-auto shadow-lg z-50`;
+    toastEl.textContent = message;
+    document.body.appendChild(toastEl);
+    setTimeout(() => toastEl.remove(), 3000);
+  };
+
+  const saveWhiteboard = async (isAutoSave = false) => {
     if (!yElementsRef.current || !encryptionKey) return;
+    if (!hasChangesRef.current && isAutoSave) return; // Skip if no changes
 
     setIsSaving(true);
+    setSaveStatus("saving");
+
     try {
-      const elements = yjsToExcalidraw(yElementsRef.current);
-      const data = JSON.stringify(elements);
-
-      // Encrypt the data
-      const encrypted = await E2EEncryption.encrypt(data, encryptionKey);
-
-      // Save to server
-      const response = await fetch(`/api/whiteboard/${uuid}`, {
+      const elements = safeElements(yjsToExcalidraw(yElementsRef.current));
+      const encrypted = await E2EEncryption.encrypt(
+        JSON.stringify(elements),
+        encryptionKey,
+      );
+      const res = await fetch(`/api/whiteboard/${uuid}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ encryptedData: encrypted }),
       });
+      if (!res.ok) throw new Error("Failed to save");
 
-      if (response.ok) {
-        console.log("✅ Whiteboard saved (encrypted)");
-        alert("✅ Whiteboard saved!");
+      const now = new Date();
+      setLastSaved(now);
+      setSaveStatus("saved");
+      hasChangesRef.current = false;
+
+      if (!isAutoSave) {
+        toast("Whiteboard saved!", "success");
       } else {
-        throw new Error("Failed to save");
+        toast("Auto-saved", "info");
       }
     } catch (err) {
-      console.error("Failed to save whiteboard:", err);
-      alert("❌ Failed to save whiteboard");
+      console.error(err);
+      setSaveStatus("unsaved");
+      toast("Failed to save whiteboard", "error");
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleShare = () => {
-    const baseUrl = `${window.location.origin}/whiteboard/${uuid}`;
-    setShareUrl(baseUrl);
-    document.getElementById("share_modal")?.showModal();
+  // Auto-save every 10 seconds if there are changes
+  React.useEffect(() => {
+    if (isLoading) return;
+
+    const autoSave = () => {
+      if (hasChangesRef.current && !isSaving) {
+        saveWhiteboard(true);
+      }
+    };
+
+    autoSaveTimerRef.current = setInterval(autoSave, 10000);
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearInterval(autoSaveTimerRef.current);
+      }
+    };
+  }, [isLoading, isSaving]);
+
+  const handleShare = () => document.getElementById("share_modal")?.showModal();
+
+  const formatLastSaved = () => {
+    if (!lastSaved) return "";
+    const seconds = Math.floor((Date.now() - lastSaved.getTime()) / 1000);
+    if (seconds < 60) return "just now";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ago`;
   };
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(shareUrl);
-    alert("📋 URL copied to clipboard!");
-  };
-
-  const copyEncryptionKey = () => {
-    navigator.clipboard.writeText(encryptionKey);
-    alert("🔑 Encryption key copied! Share this with collaborators.");
-  };
-
-  if (!ExcalidrawComponents) {
-    return <div>Loading...</div>;
-  }
-
+  if (!ExcalidrawComponents) return <div>Loading Excalidraw...</div>;
   const Menu = ExcalidrawComponents.MainMenu;
   const Welcome = ExcalidrawComponents.WelcomeScreen;
 
   return (
     <>
+      {isLoading && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black/40 z-50">
+          <span className="loading loading-spinner loading-lg text-white"></span>
+        </div>
+      )}
+
       <div style={{ width: "100vw", height: "100vh" }} ref={excalidrawRef}>
         <Excalidraw
           isCollaborating={isCollaborating}
           excalidrawAPI={(api) => (apiRef.current = api)}
+          initialData={{
+            elements: safeElements(
+              yjsToExcalidraw(yElementsRef.current ?? new Y.Array()),
+            ),
+          }}
           UIOptions={{
             canvasActions: {
               export: false,
@@ -344,36 +330,37 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
             },
           }}
           renderTopRightUI={() => (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <button
-                onClick={saveWhiteboard}
-                disabled={isSaving}
-                style={{
-                  padding: "4px 12px",
-                  borderRadius: "4px",
-                  background: isSaving ? "#ccc" : "#4CAF50",
-                  color: "white",
-                  border: "none",
-                  cursor: isSaving ? "not-allowed" : "pointer",
-                  fontSize: "14px",
-                }}
-              >
-                {isSaving ? "Saving..." : "💾 Save"}
-              </button>
+            <div className="flex items-center gap-2">
+              <div className="flex flex-col items-end text-xs mr-2">
+                <button
+                  onClick={() => saveWhiteboard(false)}
+                  disabled={isSaving}
+                  className={`btn btn-sm rounded-md ${
+                    saveStatus === "saved"
+                      ? "btn-ghost"
+                      : saveStatus === "saving"
+                        ? "btn-ghost loading"
+                        : "btn-warning"
+                  }`}
+                >
+                  {saveStatus === "saving"
+                    ? "Saving..."
+                    : saveStatus === "saved"
+                      ? "✓ Saved"
+                      : "⚠ Unsaved"}
+                </button>
+                {lastSaved && (
+                  <span className="text-gray-500 mt-1">
+                    {formatLastSaved()}
+                  </span>
+                )}
+              </div>
               <LiveCollaborationTrigger
                 isCollaborating={isCollaborating}
                 onSelect={handleShare}
               />
-              <span style={{ marginLeft: 6, fontWeight: "bold" }}>
-                {peerCount}
-              </span>
             </div>
           )}
-          initialData={{
-            elements: yElementsRef.current
-              ? yjsToExcalidraw(yElementsRef.current)
-              : [],
-          }}
         >
           <Menu>
             <Menu.Group title="File & Canvas">
@@ -384,12 +371,10 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
               <Menu.DefaultItems.SearchMenu />
               <Menu.DefaultItems.ClearCanvas />
             </Menu.Group>
-
             <Menu.Group title="Appearance">
               <Menu.DefaultItems.ToggleTheme />
               <Menu.DefaultItems.ChangeCanvasBackground />
             </Menu.Group>
-
             <Menu.DefaultItems.Help />
           </Menu>
 
@@ -397,11 +382,7 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
             <Welcome>
               <Welcome.Center>
                 <Welcome.Center.Logo>
-                  <img
-                    src="/logo.png"
-                    alt="Logo"
-                    style={{ width: "100%", maxWidth: "200px" }}
-                  />
+                  <img src="/logo.png" alt="Logo" className="max-w-xs w-full" />
                 </Welcome.Center.Logo>
                 <Welcome.Center.Heading>
                   Welcome to Your Whiteboard
@@ -419,7 +400,7 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
         </Excalidraw>
       </div>
 
-      {/* DaisyUI Share Modal */}
+      {/* Share Modal */}
       <dialog id="share_modal" className="modal">
         <div className="modal-box">
           <form method="dialog">
@@ -427,16 +408,12 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
               ✕
             </button>
           </form>
-
           <h3 className="font-bold text-lg mb-4">Share Whiteboard</h3>
-
-          <div className="flex justify-center mb-4">
-            <QRCodeSVG value={shareUrl} size={192} />
-          </div>
-
           <div className="form-control mb-4">
             <label className="label">
-              <span className="label-text">Share URL:</span>
+              <span className="label-text">
+                Share URL (includes encryption key):
+              </span>
             </label>
             <div className="flex gap-2">
               <input
@@ -445,35 +422,20 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
                 readOnly
                 className="input input-bordered flex-1 text-sm"
               />
-              <button onClick={copyToClipboard} className="btn btn-primary">
-                Copy
-              </button>
-            </div>
-          </div>
-
-          <div className="form-control mb-4">
-            <label className="label">
-              <span className="label-text">
-                🔑 Encryption Key (share separately):
-              </span>
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={encryptionKey}
-                readOnly
-                className="input input-bordered flex-1 text-sm font-mono"
-              />
               <button
-                onClick={copyEncryptionKey}
-                className="btn btn-secondary btn-outline"
+                onClick={() =>
+                  navigator.clipboard
+                    .writeText(shareUrl)
+                    .then(() => toast("Copied!", "success"))
+                }
+                className="btn btn-primary"
               >
-                Copy Key
+                Copy
               </button>
             </div>
             <label className="label">
               <span className="label-text-alt text-warning">
-                ⚠️ Keep this key secret! It's needed to decrypt the whiteboard.
+                ⚠️ Anyone with this URL can access the whiteboard
               </span>
             </label>
           </div>
