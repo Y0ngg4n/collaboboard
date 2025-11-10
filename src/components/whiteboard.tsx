@@ -9,6 +9,7 @@ import { ExcalidrawBinding, yjsToExcalidraw } from "y-excalidraw";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import E2EEncryption from "@/lib/E2EEncryption";
+import { WebsocketProvider } from "y-websocket";
 
 // Dynamic imports for Excalidraw components
 const Excalidraw = dynamic(
@@ -37,11 +38,13 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
   const apiRef = React.useRef<any>(null);
   const bindingRef = React.useRef<ExcalidrawBinding | null>(null);
   const ydocRef = React.useRef<Y.Doc | null>(null);
-  const providerRef = React.useRef<WebrtcProvider | null>(null);
+  const providerRef = React.useRef<WebsocketProvider | null>(null);
+  // const providerRef = React.useRef<WebrtcProvider | null>(null);
   const yElementsRef = React.useRef<Y.Array<Y.Map<any>> | null>(null);
   const yAssetsRef = React.useRef<Y.Map<any> | null>(null);
   const autoSaveTimerRef = React.useRef<NodeJS.Timeout | null>(null);
   const hasChangesRef = React.useRef(false);
+  const isSynced = React.useRef(false);
 
   const [isCollaborating, setIsCollaborating] = React.useState(false);
   const [peerCount, setPeerCount] = React.useState(1);
@@ -100,14 +103,17 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     const yElements = ydoc.getArray<Y.Map<any>>("elements");
     const yAssets = ydoc.getMap("assets");
 
-    const provider = new WebrtcProvider(uuid, ydoc, {
-      signaling: ["ws://127.0.0.1:4444"],
-      peerOpts: {
-        config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
-      },
-    });
+    const provider = new WebsocketProvider(
+      "ws://localhost:1234", // ← Change to your WS server URL
+      uuid,
+      ydoc, // ← Use the same ydoc!
+      { connect: true },
+    );
 
-    provider.on("status", ({ connected }) => setIsCollaborating(connected));
+    provider.on("status", ({ status }) =>
+      setIsCollaborating(status === "connected"),
+    );
+
     provider.awareness.on("update", () =>
       setPeerCount(provider.awareness.getStates().size),
     );
@@ -134,11 +140,23 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
 
   // Load saved whiteboard from server **before binding**
   // Load saved whiteboard from server
+  // Load saved whiteboard from server
+  // Load saved whiteboard from server ONLY if WebSocket is synced and Y.js is empty
   React.useEffect(() => {
-    if (!encryptionKey || !yElementsRef.current) return;
+    if (!encryptionKey || !yElementsRef.current || !ydocRef.current) return;
+    if (!isSynced) return; // Wait for WebSocket sync first
 
     const loadWhiteboard = async () => {
       try {
+        // If Y.js already has data (synced from other clients), don't load from server
+        if (yElementsRef.current!.length > 0) {
+          console.log(
+            "✅ Data already synced from other clients, skipping server load",
+          );
+          setIsLoading(false);
+          return;
+        }
+
         setIsLoading(true);
         const response = await fetch(`/api/whiteboard/${uuid}`);
         if (response.ok) {
@@ -149,34 +167,44 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
           );
           const elements = JSON.parse(decrypted);
           const filtered = safeElements(elements);
-          if (yElementsRef.current != null) {
-            yElementsRef.current.doc?.transact(() => {
-              yElementsRef.current!.delete(0, yElementsRef.current!.length);
+
+          // Double-check Y.js is still empty before loading
+          if (yElementsRef.current!.length === 0 && filtered.length > 0) {
+            ydocRef.current!.transact(() => {
               filtered.forEach((el) => {
+                // Ensure element has required properties
+                if (!el || !el.id || !el.type) {
+                  console.warn("Skipping invalid element:", el);
+                  return;
+                }
+
                 const map = new Y.Map();
-                Object.entries(el).forEach(([k, v]) => map.set(k, v));
+                Object.entries(el).forEach(([k, v]) => {
+                  // Skip undefined values
+                  if (v !== undefined) {
+                    map.set(k, v);
+                  }
+                });
                 yElementsRef.current!.push([map]);
               });
             });
+
+            console.log(`✅ Loaded ${filtered.length} elements from server`);
+          } else if (yElementsRef.current!.length > 0) {
+            console.log("✅ Data appeared during load, using synced data");
           }
-          // Update Excalidraw only if API exists
-          if (apiRef.current && filtered.length > 0) {
-            apiRef.current.updateScene({
-              elements: filtered,
-              commitToHistory: false,
-            });
-          }
+        } else {
+          console.log("No saved data on server, starting fresh");
         }
       } catch (err) {
         console.warn("Failed to load whiteboard:", err);
       } finally {
-        // ✅ Always set loading to false
         setIsLoading(false);
       }
     };
 
     loadWhiteboard();
-  }, [uuid, encryptionKey]);
+  }, [uuid, encryptionKey, isSynced]);
 
   // Initialize ExcalidrawBinding after API is ready AND server load is done
   // Initialize ExcalidrawBinding

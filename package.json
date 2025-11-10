@@ -14,6 +14,7 @@
         "@libsql/client": "^0.15.15",
         "@noble/hashes": "^2.0.1",
         "@types/fabric": "^5.3.10",
+        "@y/websocket-server": "^0.1.1",
         "better-sqlite3": "^12.4.1",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
