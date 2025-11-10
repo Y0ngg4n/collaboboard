@@ -10,6 +10,7 @@ import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import E2EEncryption from "@/lib/E2EEncryption";
 import { WebsocketProvider } from "y-websocket";
+import { formatDistanceToNow } from "date-fns";
 
 // Dynamic imports for Excalidraw components
 const Excalidraw = dynamic(
@@ -39,13 +40,12 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
   const bindingRef = React.useRef<ExcalidrawBinding | null>(null);
   const ydocRef = React.useRef<Y.Doc | null>(null);
   const providerRef = React.useRef<WebsocketProvider | null>(null);
-  // const providerRef = React.useRef<WebrtcProvider | null>(null);
   const yElementsRef = React.useRef<Y.Array<Y.Map<any>> | null>(null);
   const yAssetsRef = React.useRef<Y.Map<any> | null>(null);
   const autoSaveTimerRef = React.useRef<NodeJS.Timeout | null>(null);
   const hasChangesRef = React.useRef(false);
-  const isSynced = React.useRef(false);
 
+  const [isSynced, setIsSynced] = React.useState(false);
   const [isCollaborating, setIsCollaborating] = React.useState(false);
   const [peerCount, setPeerCount] = React.useState(1);
   const [shareUrl, setShareUrl] = React.useState("");
@@ -58,6 +58,14 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
   const [saveStatus, setSaveStatus] = React.useState<
     "saved" | "saving" | "unsaved"
   >("saved");
+  const [wsStatus, setWsStatus] = React.useState<
+    "connecting" | "connected" | "disconnected"
+  >("connecting");
+
+  // REMOTE CURSORS STATE
+  const [remoteCursors, setRemoteCursors] = React.useState<
+    { clientId: number; x: number; y: number; color: string; name: string }[]
+  >([]);
 
   const searchParams = useSearchParams();
 
@@ -65,6 +73,13 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
   React.useEffect(() => {
     import("@excalidraw/excalidraw").then(setExcalidrawComponents);
   }, []);
+
+  React.useEffect(() => {
+    const interval = setInterval(() => {
+      if (lastSaved) setLastSaved((prev) => new Date(prev!)); // triggers re-render
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [lastSaved]);
 
   // Generate or load encryption key from URL
   React.useEffect(() => {
@@ -89,13 +104,59 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     );
   }, [encryptionKey, uuid]);
 
+  // LOCAL CURSOR + VIEWPORT TRACKING
+  React.useEffect(() => {
+    if (!apiRef.current || !providerRef.current) return;
+
+    const handleViewportAndCursor = () => {
+      const appState = apiRef.current.getAppState();
+      const { scrollX, scrollY, zoom } = appState;
+
+      const currentUser =
+        providerRef.current!.awareness.getLocalState()?.user || {};
+      providerRef.current!.awareness.setLocalStateField("user", {
+        ...currentUser,
+        viewport: { scrollX, scrollY, zoom },
+        cursor: currentUser.cursor || null,
+      });
+    };
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!apiRef.current || !apiRef.current.canvas) return; // ✅ safe check
+
+      const rect = apiRef.current.canvas.getBoundingClientRect();
+      const x =
+        (event.clientX - rect.left) / apiRef.current.viewport.zoom +
+        apiRef.current.viewport.scrollX;
+      const y =
+        (event.clientY - rect.top) / apiRef.current.viewport.zoom +
+        apiRef.current.viewport.scrollY;
+
+      if (providerRef.current && providerRef.current.awareness) {
+        const state = providerRef.current.awareness.getLocalState() || {};
+        providerRef.current.awareness.setLocalStateField("user", {
+          ...(state.user || {}),
+          cursor: { x, y },
+        });
+      }
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    apiRef.current.appStateChangeCallback = handleViewportAndCursor;
+
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      if (apiRef.current) apiRef.current.appStateChangeCallback = undefined;
+    };
+  }, [apiRef.current, providerRef.current]);
+
   // Safe element filter
   const safeElements = (elements: any[]) =>
     Array.isArray(elements)
       ? elements.filter((el) => el && typeof el === "object" && "id" in el)
       : [];
 
-  // Init Yjs + WebRTC first
+  // Init Yjs + WebSocket
   React.useEffect(() => {
     if (ydocRef.current) return;
 
@@ -103,21 +164,66 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     const yElements = ydoc.getArray<Y.Map<any>>("elements");
     const yAssets = ydoc.getMap("assets");
 
-    const provider = new WebsocketProvider(
-      "ws://localhost:1234", // ← Change to your WS server URL
-      uuid,
-      ydoc, // ← Use the same ydoc!
-      { connect: true },
-    );
+    const provider = new WebsocketProvider("ws://localhost:1234", uuid, ydoc, {
+      connect: true,
+      resyncInterval: 5000,
+    });
 
-    provider.on("status", ({ status }) =>
-      setIsCollaborating(status === "connected"),
-    );
+    // Listen to connection status
+    provider.on("status", ({ status }) => {
+      if (status === "connected") {
+        setWsStatus("connected");
+        setIsCollaborating(true);
+        setIsSynced(true);
+      } else {
+        setWsStatus("disconnected");
+        setIsCollaborating(false);
+        setIsSynced(false);
+      }
+    });
 
-    provider.awareness.on("update", () =>
-      setPeerCount(provider.awareness.getStates().size),
-    );
+    // Attempt reconnect on disconnect
+    provider.on("connection-close", () => {
+      setWsStatus("disconnected");
+      const retryInterval = setInterval(() => {
+        if (provider.wsconnected) {
+          clearInterval(retryInterval);
+        } else {
+          console.warn("🔁 Retrying WebSocket connection...");
+          provider.connect();
+        }
+      }, 5000);
+    });
 
+    // Update peer count safely
+    provider.awareness.on("update", () => {
+      setPeerCount(provider.awareness.getStates().size);
+    });
+
+    // --- SAFE REMOTE CURSOR TRACKING ---
+    const prevCursorsRef = { current: "" }; // Using plain object since inside same effect
+    const handleAwarenessUpdate = () => {
+      const states = Array.from(provider.awareness.getStates().entries());
+      const cursors = states
+        .filter(([clientId, state]) => clientId !== ydoc.clientID)
+        .map(([clientId, state]) => ({
+          clientId,
+          x: state.viewport?.scrollX ?? 0,
+          y: state.viewport?.scrollY ?? 0,
+          name: state.user?.name ?? "Anonymous",
+          color: state.user?.color ?? "#30bced",
+        }));
+
+      const hash = JSON.stringify(cursors);
+      if (hash !== prevCursorsRef.current) {
+        prevCursorsRef.current = hash;
+        setRemoteCursors(cursors);
+      }
+    };
+
+    provider.awareness.on("update", handleAwarenessUpdate);
+
+    // Set local user info
     provider.awareness.setLocalStateField("user", {
       name: "Anonymous " + Math.floor(Math.random() * 100),
       color: "#30bced",
@@ -130,29 +236,26 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
       setSaveStatus("unsaved");
     });
 
+    // Save refs
     ydocRef.current = ydoc;
     providerRef.current = provider;
     yElementsRef.current = yElements;
     yAssetsRef.current = yAssets;
 
-    return () => provider.destroy();
+    return () => {
+      provider.awareness.off("update", handleAwarenessUpdate);
+      provider.destroy();
+    };
   }, [uuid]);
 
-  // Load saved whiteboard from server **before binding**
-  // Load saved whiteboard from server
-  // Load saved whiteboard from server
-  // Load saved whiteboard from server ONLY if WebSocket is synced and Y.js is empty
+  // LOAD WHITEBOARD
   React.useEffect(() => {
     if (!encryptionKey || !yElementsRef.current || !ydocRef.current) return;
-    if (!isSynced) return; // Wait for WebSocket sync first
+    if (!isSynced) return;
 
     const loadWhiteboard = async () => {
       try {
-        // If Y.js already has data (synced from other clients), don't load from server
         if (yElementsRef.current!.length > 0) {
-          console.log(
-            "✅ Data already synced from other clients, skipping server load",
-          );
           setIsLoading(false);
           return;
         }
@@ -168,33 +271,18 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
           const elements = JSON.parse(decrypted);
           const filtered = safeElements(elements);
 
-          // Double-check Y.js is still empty before loading
           if (yElementsRef.current!.length === 0 && filtered.length > 0) {
             ydocRef.current!.transact(() => {
               filtered.forEach((el) => {
-                // Ensure element has required properties
-                if (!el || !el.id || !el.type) {
-                  console.warn("Skipping invalid element:", el);
-                  return;
-                }
-
+                if (!el || !el.id || !el.type) return;
                 const map = new Y.Map();
                 Object.entries(el).forEach(([k, v]) => {
-                  // Skip undefined values
-                  if (v !== undefined) {
-                    map.set(k, v);
-                  }
+                  if (v !== undefined) map.set(k, v);
                 });
                 yElementsRef.current!.push([map]);
               });
             });
-
-            console.log(`✅ Loaded ${filtered.length} elements from server`);
-          } else if (yElementsRef.current!.length > 0) {
-            console.log("✅ Data appeared during load, using synced data");
           }
-        } else {
-          console.log("No saved data on server, starting fresh");
         }
       } catch (err) {
         console.warn("Failed to load whiteboard:", err);
@@ -206,29 +294,23 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     loadWhiteboard();
   }, [uuid, encryptionKey, isSynced]);
 
-  // Initialize ExcalidrawBinding after API is ready AND server load is done
-  // Initialize ExcalidrawBinding
+  // INITIALIZE EXCALIDRAW BINDING
   React.useEffect(() => {
     if (!apiRef.current || bindingRef.current) return;
     if (!ydocRef.current || !providerRef.current) return;
     if (!yElementsRef.current || !yAssetsRef.current) return;
 
-    try {
-      const binding = new ExcalidrawBinding(
-        yElementsRef.current,
-        yAssetsRef.current,
-        apiRef.current,
-        providerRef.current.awareness,
-        {
-          excalidrawDom: excalidrawRef.current!,
-          undoManager: new Y.UndoManager(yElementsRef.current),
-        },
-      );
-      bindingRef.current = binding;
-      console.log("✅ ExcalidrawBinding initialized");
-    } catch (err) {
-      console.error("Failed to initialize ExcalidrawBinding:", err);
-    }
+    const binding = new ExcalidrawBinding(
+      yElementsRef.current,
+      yAssetsRef.current,
+      apiRef.current,
+      providerRef.current.awareness,
+      {
+        excalidrawDom: excalidrawRef.current!,
+        undoManager: new Y.UndoManager(yElementsRef.current),
+      },
+    );
+    bindingRef.current = binding;
 
     return () => {
       bindingRef.current?.destroy();
@@ -261,7 +343,7 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
 
   const saveWhiteboard = async (isAutoSave = false) => {
     if (!yElementsRef.current || !encryptionKey) return;
-    if (!hasChangesRef.current && isAutoSave) return; // Skip if no changes
+    if (!hasChangesRef.current && isAutoSave) return;
 
     setIsSaving(true);
     setSaveStatus("saving");
@@ -284,11 +366,8 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
       setSaveStatus("saved");
       hasChangesRef.current = false;
 
-      if (!isAutoSave) {
-        toast("Whiteboard saved!", "success");
-      } else {
-        toast("Auto-saved", "info");
-      }
+      if (!isAutoSave) toast("Whiteboard saved!", "success");
+      else toast("Auto-saved", "info");
     } catch (err) {
       console.error(err);
       setSaveStatus("unsaved");
@@ -298,35 +377,36 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
     }
   };
 
-  // Auto-save every 10 seconds if there are changes
   React.useEffect(() => {
     if (isLoading) return;
-
     const autoSave = () => {
-      if (hasChangesRef.current && !isSaving) {
-        saveWhiteboard(true);
-      }
+      if (hasChangesRef.current && !isSaving) saveWhiteboard(true);
     };
-
     autoSaveTimerRef.current = setInterval(autoSave, 10000);
-
     return () => {
-      if (autoSaveTimerRef.current) {
-        clearInterval(autoSaveTimerRef.current);
-      }
+      if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current);
     };
   }, [isLoading, isSaving]);
 
   const handleShare = () => document.getElementById("share_modal")?.showModal();
 
-  const formatLastSaved = () => {
-    if (!lastSaved) return "";
-    const seconds = Math.floor((Date.now() - lastSaved.getTime()) / 1000);
-    if (seconds < 60) return "just now";
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    return `${hours}h ago`;
+  const formatLastSaved = () =>
+    lastSaved
+      ? `Saved ${formatDistanceToNow(lastSaved, { addSuffix: true })}`
+      : "";
+
+  // FOLLOW USER HELPER
+  const followUser = (clientId: number) => {
+    if (!apiRef.current || !providerRef.current) return;
+
+    const state = providerRef.current.awareness.getStates().get(clientId);
+    if (!state?.user?.viewport) return;
+
+    const { scrollX, scrollY, zoom } = state.user.viewport;
+
+    // Scroll and zoom correctly using Excalidraw API
+    apiRef.current.scrollTo({ x: scrollX, y: scrollY }, true);
+    apiRef.current.zoomTo(zoom, true);
   };
 
   if (!ExcalidrawComponents) return <div>Loading Excalidraw...</div>;
@@ -335,12 +415,6 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
 
   return (
     <>
-      {isLoading && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/40 z-50">
-          <span className="loading loading-spinner loading-lg text-white"></span>
-        </div>
-      )}
-
       <div style={{ width: "100vw", height: "100vh" }} ref={excalidrawRef}>
         <Excalidraw
           isCollaborating={isCollaborating}
@@ -358,35 +432,62 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
             },
           }}
           renderTopRightUI={() => (
-            <div className="flex items-center gap-2">
-              <div className="flex flex-col items-end text-xs mr-2">
-                <button
-                  onClick={() => saveWhiteboard(false)}
-                  disabled={isSaving}
-                  className={`btn btn-sm rounded-md ${
-                    saveStatus === "saved"
-                      ? "btn-ghost"
-                      : saveStatus === "saving"
-                        ? "btn-ghost loading"
-                        : "btn-warning"
-                  }`}
-                >
-                  {saveStatus === "saving"
-                    ? "Saving..."
-                    : saveStatus === "saved"
-                      ? "✓ Saved"
-                      : "⚠ Unsaved"}
-                </button>
+            <div className="flex flex-row items-start gap-3 mr-2">
+              {/* Connection status badge */}
+              <div
+                className={`inline-flex items-center justify-center rounded-md px-3 h-[32px] font-semibold text-sm border ${
+                  wsStatus === "connected"
+                    ? "bg-green-100 text-green-700 border-green-300"
+                    : wsStatus === "connecting"
+                      ? "bg-yellow-100 text-yellow-700 border-yellow-300"
+                      : "bg-red-100 text-red-700 border-red-300"
+                }`}
+              >
+                {wsStatus === "connecting" && (
+                  <>
+                    <span className="loading loading-spinner loading-xs mr-1"></span>
+                    Connecting...
+                  </>
+                )}
+                {wsStatus === "connected" && <>🟢 Connected</>}
+                {wsStatus === "disconnected" && <>🔴 Disconnected</>}
+              </div>
+
+              {/* Save button + last saved timestamp (stacked vertically) */}
+              <div className="flex flex-col items-center gap-1">
+                {wsStatus === "connected" && (
+                  <button
+                    onClick={() => saveWhiteboard(false)}
+                    disabled={isSaving}
+                    className={`btn btn-sm rounded-md ${
+                      saveStatus === "saved"
+                        ? "btn-primary"
+                        : saveStatus === "saving"
+                          ? "btn-primary loading"
+                          : "btn-warning"
+                    }`}
+                  >
+                    {saveStatus === "saving"
+                      ? "Saving..."
+                      : saveStatus === "saved"
+                        ? "✓ Saved"
+                        : "⚠ Unsaved"}
+                  </button>
+                )}
                 {lastSaved && (
-                  <span className="text-gray-500 mt-1">
+                  <span className="text-gray-500 text-[11px]">
                     {formatLastSaved()}
                   </span>
                 )}
               </div>
-              <LiveCollaborationTrigger
-                isCollaborating={isCollaborating}
-                onSelect={handleShare}
-              />
+
+              {/* Collaboration avatars aligned vertically center */}
+              <div className="flex items-center h-[32px]">
+                <LiveCollaborationTrigger
+                  isCollaborating={isCollaborating}
+                  onSelect={handleShare}
+                />
+              </div>
             </div>
           )}
         >
@@ -425,6 +526,43 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
               <Welcome.Hints.HelpHint />
             </Welcome>
           )}
+
+          {/* REMOTE CURSORS */}
+          {remoteCursors.map((cursor) => (
+            <div
+              key={cursor.clientId}
+              style={{
+                position: "absolute",
+                left: cursor.x,
+                top: cursor.y,
+                transform: "translate(-50%, -50%)",
+                pointerEvents: "none",
+                zIndex: 9999,
+              }}
+            >
+              <div
+                style={{
+                  width: 12,
+                  height: 12,
+                  borderRadius: "50%",
+                  backgroundColor: cursor.color,
+                  border: "2px solid white",
+                }}
+              ></div>
+              <div
+                style={{
+                  fontSize: 10,
+                  color: cursor.color,
+                  fontWeight: "bold",
+                  textAlign: "center",
+                  marginTop: 2,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {cursor.name}
+              </div>
+            </div>
+          ))}
         </Excalidraw>
       </div>
 
