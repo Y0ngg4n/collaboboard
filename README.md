@@ -44,4 +44,6 @@ PORT=4444 node node_modules/y-webrtc/bin/server.js
 ```
 
 ## Y.js Web Socket Signaling Server
+``` bash
 HOST=localhost PORT=1234 npx y-websocket
+```
