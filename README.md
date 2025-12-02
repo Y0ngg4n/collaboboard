@@ -38,7 +38,10 @@ The easiest way to deploy your Next.js app is to use the [Vercel Platform](https
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
 
 
-## Y.js WebRTC Signaling Server
+## ~Y.js WebRTC Signaling Server (deprecated)~
 ``` bash
 PORT=4444 node node_modules/y-webrtc/bin/server.js
 ```
+
+## Y.js Web Socket Signaling Server
+HOST=localhost PORT=1234 npx y-websocket
