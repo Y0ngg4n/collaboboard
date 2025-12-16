@@ -568,16 +568,18 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
 
       {/* Share Modal */}
       <dialog id="share_modal" className="modal">
-        <div className="modal-box">
+        <div className="modal-box bg-base-100">
           <form method="dialog">
-            <button className="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">
+            <button className="btn btn-sm btn-circle btn-ghost absolute right-2 top-2 text-base-content">
               ✕
             </button>
           </form>
-          <h3 className="font-bold text-lg mb-4">Share Whiteboard</h3>
+          <h3 className="font-bold text-lg mb-4 text-base-content">
+            Share Whiteboard
+          </h3>
           <div className="form-control mb-4">
             <label className="label">
-              <span className="label-text">
+              <span className="label-text text-base-content">
                 Share URL (includes encryption key):
               </span>
             </label>
@@ -586,7 +588,7 @@ export default function Whiteboard({ uuid }: WhiteboardProps) {
                 type="text"
                 value={shareUrl}
                 readOnly
-                className="input input-bordered flex-1 text-sm"
+                className="input input-bordered flex-1 text-sm bg-base-200 text-base-content"
               />
               <button
                 onClick={() =>
