@@ -8,7 +8,7 @@ export default class E2EEncryption {
     salt: Uint8Array,
   ): Promise<CryptoKey> {
     const keyMaterial = utf8ToBytes(password);
-    const rawKey = pbkdf2(blake3, keyMaterial, salt, { c: 100_000, dkLen: 32 });
+    const rawKey = pbkdf2(blake3, keyMaterial, salt, { c: 600_000, dkLen: 32 });
 
     return crypto.subtle.importKey(
       "raw",
